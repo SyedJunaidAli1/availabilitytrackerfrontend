@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
  * If URL has token: decode and show who they're logging in as, then redirect to SSO.
  * Reads from window.location.search so token is never lost (e.g. after redirects).
  */
-const PLATFORM_URL = import.meta.env.VITE_PLATFORM_URL || "https://mentorquedu.com";
+const PLATFORM_URL = import.meta.env.VITE_PLATFORM_URL || "https://app.mentorquedu.com/signin";
 
 function decodeTokenPayload(token) {
   try {
