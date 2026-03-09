@@ -5,6 +5,7 @@ import {
   getWeekStartStr,
   formatDateLocal,
   formatTimeLocal,
+  formatTimeRange,
   slotToUTC,
   isPastDate,
   isPastDateTime,
@@ -13,14 +14,14 @@ import {
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
 const TIMEZONE_OPTIONS = [
-  { value: "UTC", label: "UTC (UTC+0)" },
-  { value: "IST", label: "IST (UTC+5:30)" },
+  { value: "UTC", label: "GMT (GMT+0)" },
+  { value: "IST", label: "IST (GMT+5:30)" },
 ];
 
 export default function Availability() {
   const { user } = useAuth();
   const [displayTimezone, setDisplayTimezone] = useState(user?.timezone || "UTC");
-  const [weekStart, setWeekStart] = useState(getWeekStartStr(new Date()));
+  const [weekOffset, setWeekOffset] = useState(0); // 0 = today..today+6, 1 = +7..+13, etc.
   const [data, setData] = useState({ dates: [], availability: {} });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -34,7 +35,13 @@ export default function Availability() {
     setLoading(true);
     setError("");
     try {
-      const res = await availabilityApi.getWeekly({ weekStart });
+      // Compute the anchor date for this view: today + weekOffset * 7 (UTC date)
+      const today = new Date();
+      const base = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+      base.setUTCDate(base.getUTCDate() + weekOffset * 7);
+      const weekStartStr = getWeekStartStr(base);
+
+      const res = await availabilityApi.getWeekly({ weekStart: weekStartStr });
       setData(res);
       setToggles({});
     } catch (e) {
@@ -42,7 +49,7 @@ export default function Availability() {
     } finally {
       setLoading(false);
     }
-  }, [weekStart]);
+  }, [weekOffset]);
 
   useEffect(() => {
     fetchWeekly();
@@ -105,19 +112,34 @@ export default function Availability() {
   };
 
   const hasChanges = Object.keys(toggles).length > 0;
-  const prevWeek = () => {
-    const d = new Date(weekStart + "T00:00:00Z");
-    d.setUTCDate(d.getUTCDate() - 7);
-    setWeekStart(d.toISOString().slice(0, 10));
-  };
-  const nextWeek = () => {
-    const d = new Date(weekStart + "T00:00:00Z");
-    d.setUTCDate(d.getUTCDate() + 7);
-    setWeekStart(d.toISOString().slice(0, 10));
+
+  // Visible 7-day window: always today + weekOffset * 7, forward only
+  const buildGridDates = () => {
+    const today = new Date();
+    const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+    start.setUTCDate(start.getUTCDate() + weekOffset * 7);
+    const days = [];
+    for (let i = 0; i < 7; i += 1) {
+      const d = new Date(start);
+      d.setUTCDate(start.getUTCDate() + i);
+      days.push(d.toISOString().slice(0, 10));
+    }
+    return days;
   };
 
-  const weekMin = data.dates[0] || "";
-  const weekMax = data.dates[6] || "";
+  const gridDates = buildGridDates();
+  const gridStart = gridDates[0];
+
+  const prevWeek = () => {
+    if (weekOffset === 0) return; // do not navigate into the past
+    setWeekOffset((prev) => Math.max(0, prev - 1));
+  };
+  const nextWeek = () => {
+    setWeekOffset((prev) => prev + 1);
+  };
+
+  const weekMin = gridDates[0] || "";
+  const weekMax = gridDates[6] || "";
 
   /** selectorDate is UTC date (YYYY-MM-DD), selectorHour is UTC hour index (0-23). */
   const isSelectorSlotDisabled =
@@ -137,28 +159,16 @@ export default function Availability() {
   const formatTimeOptionLabel = (utcHourIndex) => {
     const startISO = new Date(Date.UTC(2000, 0, 1, utcHourIndex, 0)).toISOString();
     const endISO = new Date(Date.UTC(2000, 0, 1, utcHourIndex + 1, 0)).toISOString();
-    return `${formatTimeLocal(startISO, displayTimezone)} – ${formatTimeLocal(endISO, displayTimezone)}`;
+    const start = formatTimeLocal(startISO, displayTimezone);
+    const end = formatTimeLocal(endISO, displayTimezone);
+    return formatTimeRange(`${start} – ${end}`);
   };
 
   return (
-    <div className="space-y-8 bg-slate-950 min-h-screen -m-8 p-8">
+    <div className="space-y-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold text-white">User Dashboard</h1>
         <p className="text-slate-400 font-medium">Manage your availability.</p>
-        <div className="pt-2">
-          <label className="block text-sm font-medium text-slate-400 mb-1.5">Timezone</label>
-          <select
-            value={displayTimezone}
-            onChange={(e) => setDisplayTimezone(e.target.value)}
-            className="rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          >
-            {TIMEZONE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </div>
       </header>
 
       {error && (
@@ -167,9 +177,23 @@ export default function Availability() {
         </div>
       )}
 
-      <section className="w-full rounded-2xl bg-slate-900 border border-slate-800 p-6">
-        <div className="flex flex-col md:flex-row md:items-end gap-6">
-          <div className="flex-1 min-w-0">
+      <section className="w-full rounded-2xl bg-slate-900 border border-slate-800 p-4">
+        <div className="flex flex-col gap-4 md:flex-row md:items-end md:gap-4">
+          <div className="w-full md:w-40">
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">Timezone</label>
+            <select
+              value={displayTimezone}
+              onChange={(e) => setDisplayTimezone(e.target.value)}
+              className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white font-medium px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              {TIMEZONE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="w-full md:w-40">
             <label className="block text-sm font-medium text-slate-400 mb-1.5">Date</label>
             <input
               type="date"
@@ -177,15 +201,15 @@ export default function Availability() {
               min={weekMin}
               max={weekMax}
               onChange={(e) => setSelectorDate(e.target.value)}
-              className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white font-medium px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent [color-scheme:dark] appearance-none"
+              className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white font-medium px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent [color-scheme:dark] appearance-none"
             />
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="w-full md:w-52">
             <label className="block text-sm font-medium text-slate-400 mb-1.5">Time</label>
             <select
               value={selectorHour}
               onChange={(e) => setSelectorHour(Number(e.target.value))}
-              className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white font-medium px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent max-h-[12rem] overflow-y-auto"
+              className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white font-medium px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent max-h-[12rem] overflow-y-auto"
             >
               {HOURS.map((utcHourIndex) => {
                 const disabled = selectorDate ? isSlotDisabled(selectorDate, utcHourIndex) : false;
@@ -209,23 +233,48 @@ export default function Availability() {
       </section>
 
       <section className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden p-6">
-        <div className="mb-4">
-          <h2 className="text-lg font-semibold text-white">Your availability</h2>
-          <p className="text-slate-400 font-medium text-sm mt-0.5">
-            Click slots to toggle availability. Save when done.
-          </p>
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Your availability</h2>
+            <p className="text-slate-400 font-medium text-sm mt-0.5">
+              Click slots to toggle availability. Save when done.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={cancelChanges}
+              disabled={!hasChanges}
+              className="rounded-lg border border-slate-600 bg-transparent text-slate-300 font-medium px-5 py-2.5 hover:bg-slate-800 hover:border-slate-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={saveBatch}
+              disabled={saving || !hasChanges}
+              className="rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium px-5 py-2.5 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? "Saving..." : "Save Availability"}
+            </button>
+          </div>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-center gap-4 mb-6">
           <button
             type="button"
             onClick={prevWeek}
-            className="rounded-full w-9 h-9 flex items-center justify-center border border-slate-700 bg-slate-800/50 text-slate-300 font-medium hover:bg-slate-800 hover:border-slate-600 transition shrink-0"
+            disabled={weekOffset === 0}
+            className={`rounded-full w-9 h-9 flex items-center justify-center border border-slate-700 bg-slate-800/50 text-slate-300 font-medium transition shrink-0 ${
+              weekOffset === 0
+                ? "opacity-40 cursor-not-allowed"
+                : "hover:bg-slate-800 hover:border-slate-600"
+            }`}
             aria-label="Previous week"
           >
             ←
           </button>
           <span className="text-slate-400 font-medium text-sm text-center">
-            Week of {formatDateLocal(weekStart, displayTimezone)}
+            Week of {formatDateLocal(gridStart, displayTimezone)}
           </span>
           <button
             type="button"
@@ -237,7 +286,7 @@ export default function Availability() {
           </button>
         </div>
 
-        <div className="overflow-x-auto -mx-1">
+        <div className="overflow-x-auto -mx-1 max-h-[60vh] overflow-y-auto">
           {loading ? (
             <div className="p-12 text-center text-slate-400 font-medium">Loading...</div>
           ) : (
@@ -245,7 +294,7 @@ export default function Availability() {
               <thead>
                 <tr className="border-b border-slate-800">
                   <th className="text-left py-4 px-3 text-slate-400 font-medium text-sm w-28">Time</th>
-                  {data.dates.map((d) => (
+                  {gridDates.map((d) => (
                     <th key={d} className="py-4 px-3 text-white font-medium text-sm">
                       {formatDateLocal(d, displayTimezone)}
                     </th>
@@ -255,10 +304,10 @@ export default function Availability() {
               <tbody>
                 {HOURS.map((hour) => (
                   <tr key={hour} className="border-b border-slate-800/80">
-                    <td className="py-3 px-3 text-slate-400 font-medium text-sm">
+                    <td className="py-2 px-3 text-slate-400 font-medium text-xs">
                       {formatTimeOptionLabel(hour)}
                     </td>
-                    {data.dates.map((dateStr) => {
+                    {gridDates.map((dateStr) => {
                       const enabled = isSlotEnabled(dateStr, hour);
                       const disabled = isSlotDisabled(dateStr, hour);
                       return (
@@ -268,7 +317,7 @@ export default function Availability() {
                             onClick={() => toggleSlot(dateStr, hour)}
                             disabled={disabled}
                             className={`
-                              w-full py-3 rounded-lg border font-medium text-xs uppercase tracking-wide transition
+                              w-full py-2 rounded-lg border font-medium text-xs uppercase tracking-wide transition
                               ${disabled
                                 ? "bg-slate-800/50 border-slate-800 cursor-not-allowed opacity-40 text-slate-500"
                                 : ""}
@@ -290,25 +339,6 @@ export default function Availability() {
               </tbody>
             </table>
           )}
-        </div>
-
-        <div className="mt-6 pt-6 border-t border-slate-800 flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={cancelChanges}
-            disabled={!hasChanges}
-            className="rounded-lg border border-slate-600 bg-transparent text-slate-300 font-medium px-5 py-2.5 hover:bg-slate-800 hover:border-slate-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={saveBatch}
-            disabled={saving || !hasChanges}
-            className="rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium px-5 py-2.5 transition disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {saving ? "Saving..." : "Save Availability"}
-          </button>
         </div>
       </section>
     </div>

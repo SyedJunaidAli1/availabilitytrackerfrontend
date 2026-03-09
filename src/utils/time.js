@@ -38,8 +38,37 @@ export function formatTimeLocal(isoString, timezone) {
   });
 }
 
+export function formatTo12Hour(timeStr) {
+  if (!timeStr) return "";
+
+  const [hourStr, minuteStr = "00"] = timeStr.split(":");
+  let hours = parseInt(hourStr, 10);
+
+  if (Number.isNaN(hours) || hours < 0 || hours > 23) return timeStr;
+
+  const period = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+
+  return `${hours}:${minuteStr} ${period}`;
+}
+
+export function formatTimeRange(rangeStr) {
+  if (!rangeStr) return "";
+
+  const parts = rangeStr.split("–");
+  if (parts.length !== 2) return rangeStr;
+
+  const [start, end] = parts.map((p) => p.trim());
+  if (!start || !end) return rangeStr;
+
+  return `${formatTo12Hour(start)} – ${formatTo12Hour(end)}`;
+}
+
 export function formatSlotLabel(startISO, endISO, timezone) {
-  return `${formatTimeLocal(startISO, timezone)} – ${formatTimeLocal(endISO, timezone)}`;
+  const start = formatTimeLocal(startISO, timezone);
+  const end = formatTimeLocal(endISO, timezone);
+  return formatTimeRange(`${start} – ${end}`);
 }
 
 /** Check if date (YYYY-MM-DD) is in the past (UTC) */

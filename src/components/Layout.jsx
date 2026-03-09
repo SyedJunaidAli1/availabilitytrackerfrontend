@@ -68,19 +68,10 @@ export default function Layout() {
         </div>
       )}
       <header className="border-b border-navy-700 bg-navy-900/80 backdrop-blur">
-        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
+        <div className="w-full px-4 h-14 flex items-center justify-between">
           {isAdminRoute && user?.role === "ADMIN" ? (
             <>
               <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  className="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-navy-800"
-                  aria-label="Menu"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                  </svg>
-                </button>
                 <div className="flex items-center gap-2">
                   <img
                     src="/mentorque-logo.png.jpeg"
@@ -156,7 +147,7 @@ export default function Layout() {
           )}
         </div>
       </header>
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-8">
+      <main className="flex-1 w-full px-4 py-8">
         <Outlet />
       </main>
     </div>

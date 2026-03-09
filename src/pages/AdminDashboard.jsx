@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { DateTime } from "luxon";
 import { useAuth } from "../context/AuthContext";
 import * as adminApi from "../api/admin";
@@ -7,15 +7,28 @@ import * as meetingsApi from "../api/meetings";
 import {
   formatDateLocal,
   formatSlotLabel,
+  formatTimeRange,
+  formatTo12Hour,
   isPastDateTime,
 } from "../utils/time";
 import AddUserModal from "../components/AddUserModal";
 import AddMentorModal from "../components/AddMentorModal";
 
 const TIMEZONE_OPTIONS = [
-  { value: "UTC", label: "UTC (UTC+0)" },
-  { value: "IST", label: "IST (UTC+5:30)" },
+  { value: "UTC", label: "GMT (GMT+0)" },
+  { value: "IST", label: "IST (GMT+5:30)" },
 ];
+
+const TIME_OPTIONS_30MIN = Array.from({ length: 48 }, (_, i) => {
+  const totalMinutes = i * 30;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  const hh = String(h).padStart(2, "0");
+  const mm = String(m).padStart(2, "0");
+  const value = `${hh}:${mm}`;
+  const label = formatTo12Hour(value);
+  return { value, label };
+});
 
 export default function AdminDashboard() {
   const { user: authUser } = useAuth();
@@ -48,6 +61,11 @@ export default function AdminDashboard() {
   const [showAddMentorModal, setShowAddMentorModal] = useState(false);
   const [meetingToDelete, setMeetingToDelete] = useState(null);
   const [deletingMeetingId, setDeletingMeetingId] = useState(null);
+  const [activeMeeting, setActiveMeeting] = useState(null);
+  const [copiedMeetingDetails, setCopiedMeetingDetails] = useState(false);
+  const meetingsRef = useRef([]);
+  const [selectedCommonSlot, setSelectedCommonSlot] = useState(null);
+  const prevDisplayTimezoneRef = useRef(displayTimezone);
 
   const loadUsers = useCallback(async () => {
     try {
@@ -105,6 +123,10 @@ export default function AdminDashboard() {
       setMeetings([]);
     }
   }, []);
+
+  useEffect(() => {
+    meetingsRef.current = meetings;
+  }, [meetings]);
 
   // Initialize admin email from localStorage (SSO) or auth user on mount
   useEffect(() => {
@@ -213,6 +235,65 @@ export default function AdminDashboard() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!success) return;
+    const timer = setTimeout(() => setSuccess(""), 2000);
+    return () => clearTimeout(timer);
+  }, [success]);
+
+  useEffect(() => {
+    const prevTz = prevDisplayTimezoneRef.current;
+    if (prevTz === displayTimezone) return;
+    if (!scheduleStart || !scheduleEnd) {
+      prevDisplayTimezoneRef.current = displayTimezone;
+      return;
+    }
+
+    const prevZone = prevTz === "IST" ? "Asia/Kolkata" : "UTC";
+    const newZone = displayTimezone === "IST" ? "Asia/Kolkata" : "UTC";
+
+    const convertOne = (isoStr) => {
+      if (!isoStr) return isoStr;
+      const datePart = isoStr.slice(0, 10);
+      const timePart = isoStr.slice(11, 16); // HH:MM
+      if (!datePart || !timePart) return isoStr;
+      const dtPrev = DateTime.fromISO(`${datePart}T${timePart}`, { zone: prevZone });
+      if (!dtPrev.isValid) return isoStr;
+      const dtNew = dtPrev.setZone(newZone);
+      const newDate = dtNew.toFormat("yyyy-MM-dd");
+      const newTime = dtNew.toFormat("HH:mm");
+      return `${newDate}T${newTime}:00.000Z`;
+    };
+
+    setScheduleStart((prev) => convertOne(prev));
+    setScheduleEnd((prev) => convertOne(prev));
+
+    prevDisplayTimezoneRef.current = displayTimezone;
+  }, [displayTimezone, scheduleStart, scheduleEnd]);
+
+  useEffect(() => {
+    const deletePastMeetings = async () => {
+      const current = meetingsRef.current;
+      if (!Array.isArray(current) || current.length === 0) return;
+      const now = new Date();
+      const past = current.filter((m) => m.endTime && new Date(m.endTime) <= now);
+      if (past.length === 0) return;
+      const pastIds = past.map((m) => m.id);
+      for (const m of past) {
+        try {
+          await meetingsApi.deleteMeeting(m.id);
+        } catch {
+          // ignore auto-delete errors
+        }
+      }
+      setMeetings((prev) => prev.filter((m) => !pastIds.includes(m.id)));
+    };
+
+    deletePastMeetings();
+    const id = setInterval(deletePastMeetings, 60000);
+    return () => clearInterval(id);
+  }, []);
 
   const addAdditionalEmail = () => setAdditionalEmails((p) => [...p, ""]);
   const setAdditionalEmail = (i, v) => {
@@ -327,126 +408,142 @@ export default function AdminDashboard() {
   const userSlotsFlat = flattenSlots(userAvailability);
   const mentorSlotsFlat = flattenSlots(mentorAvailability);
 
-  const userGroupedByWeek = useMemo(
-    () => groupSlotsByLocalDate(userAvailability, selectedTimezone),
-    [userAvailability, selectedTimezone, groupSlotsByLocalDate]
-  );
-  const mentorGroupedByWeek = useMemo(
-    () => groupSlotsByLocalDate(mentorAvailability, selectedTimezone),
-    [mentorAvailability, selectedTimezone, groupSlotsByLocalDate]
+  const userByLocalDate = useMemo(
+    () => groupFlatSlotsByLocalDate(userSlotsFlat, selectedTimezone),
+    [userSlotsFlat, selectedTimezone, groupFlatSlotsByLocalDate]
   );
 
-  const matchingSlots = selectedUser && selectedMentor
-    ? userSlotsFlat.filter((userSlot) =>
-        mentorSlotsFlat.some((mentorSlot) => mentorSlot.startTime === userSlot.startTime)
-      )
-    : [];
-
-  const matchingByLocalDate = useMemo(
-    () => groupFlatSlotsByLocalDate(matchingSlots, selectedTimezone),
-    [matchingSlots, selectedTimezone, groupFlatSlotsByLocalDate]
+  const mentorByLocalDate = useMemo(
+    () => groupFlatSlotsByLocalDate(mentorSlotsFlat, selectedTimezone),
+    [mentorSlotsFlat, selectedTimezone, groupFlatSlotsByLocalDate]
   );
 
-  const renderUserWeeklyList = () => {
-    if (loadingUserAvail) {
-      return <div className="p-4 text-center text-slate-400 text-sm">Loading...</div>;
-    }
-    const { byDate } = userGroupedByWeek;
-    const { dayKeys } = displayWeekInfo;
-    return (
-      <ul className="space-y-4">
-        {dayKeys.map((dateKey) => {
-          const dayLabel = DateTime.fromISO(dateKey + "T00:00:00", { zone: selectedTimezone }).toFormat("ccc, dd LLL");
-          const dayData = byDate[dateKey];
-          const slots = dayData?.slots ?? [];
-          return (
-            <li key={dateKey} className="border-b border-slate-800 pb-3 last:border-0">
-              <div className="font-medium text-white text-sm mb-2">{dayLabel}</div>
-              {slots.length === 0 ? (
-                <div className="text-slate-500 text-sm pl-2">No availability</div>
-              ) : (
-                <ul className="space-y-1 pl-2">
-                  {slots.map((slot) => (
-                    <li key={slot.startTime} className="text-slate-300 text-sm">
-                      {slot.convertedStart} – {slot.convertedEnd}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    );
+  const upcomingDays = useMemo(() => {
+    const today = DateTime.now().setZone(selectedTimezone).startOf("day");
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = today.plus({ days: i });
+      return {
+        key: d.toFormat("yyyy-MM-dd"),
+        label: d.toFormat("ccc, dd LLL"),
+      };
+    });
+  }, [selectedTimezone]);
+
+  const formatSlotsForDay = (slots, emptyLabel = "No availability") => {
+    if (!slots || slots.length === 0) return emptyLabel;
+    return slots
+      .map((slot) => formatTimeRange(`${slot.convertedStart} – ${slot.convertedEnd}`))
+      .join(", ");
   };
 
-  const renderMentorWeeklyList = () => {
-    if (loadingMentorAvail) {
-      return <div className="p-4 text-center text-slate-400 text-sm">Loading...</div>;
-    }
-    const { byDate } = mentorGroupedByWeek;
-    const { dayKeys } = displayWeekInfo;
-    return (
-      <ul className="space-y-4">
-        {dayKeys.map((dateKey) => {
-          const dayLabel = DateTime.fromISO(dateKey + "T00:00:00", { zone: selectedTimezone }).toFormat("ccc, dd LLL");
-          const dayData = byDate[dateKey];
-          const slots = dayData?.slots ?? [];
-          return (
-            <li key={dateKey} className="border-b border-slate-800 pb-3 last:border-0">
-              <div className="font-medium text-white text-sm mb-2">{dayLabel}</div>
-              {slots.length === 0 ? (
-                <div className="text-slate-500 text-sm pl-2">No availability</div>
-              ) : (
-                <ul className="space-y-1 pl-2">
-                  {slots.map((slot) => (
-                    <li key={slot.startTime} className="text-slate-300 text-sm">
-                      {slot.convertedStart} – {slot.convertedEnd}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    );
+  const parseHmToMinutes = (hm) => {
+    if (!hm) return null;
+    const [hStr, mStr] = hm.split(":");
+    const h = Number(hStr);
+    const m = Number(mStr);
+    if (Number.isNaN(h) || Number.isNaN(m)) return null;
+    return h * 60 + m;
   };
 
-  const renderMatchingList = () => {
-    if (!selectedUser || !selectedMentor) {
-      return <div className="text-slate-500 text-sm pl-2">Select both User and Mentor to see matching slots</div>;
+  const minutesToHm = (minutes) => {
+    let total = minutes;
+    if (total < 0) total = 0;
+    if (total > 1440) total = 1440;
+    if (total === 1440) total = 0; // treat midnight as 00:00 of next day
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    const hh = h.toString().padStart(2, "0");
+    const mm = m.toString().padStart(2, "0");
+    return `${hh}:${mm}`;
+  };
+
+  const computeCommonSlotsForDay = (userSlots = [], mentorSlots = []) => {
+    const results = [];
+    for (const u of userSlots) {
+      const uStart = parseHmToMinutes(u.convertedStart);
+      const uEndRaw = parseHmToMinutes(u.convertedEnd);
+      if (uStart == null || uEndRaw == null) continue;
+      let uEnd = uEndRaw;
+      if (uEnd <= uStart) uEnd += 1440; // handle local cross-midnight
+
+      for (const m of mentorSlots) {
+        const mStart = parseHmToMinutes(m.convertedStart);
+        const mEndRaw = parseHmToMinutes(m.convertedEnd);
+        if (mStart == null || mEndRaw == null) continue;
+        let mEnd = mEndRaw;
+        if (mEnd <= mStart) mEnd += 1440;
+
+        let start = Math.max(uStart, mStart, 0);
+        let end = Math.min(uEnd, mEnd, 1440);
+
+        if (end <= start) continue; // no overlap or just touching
+
+        const startHm = minutesToHm(start);
+        const endHm = minutesToHm(end);
+        results.push({ startHm, endHm });
+      }
     }
-    if (loadingUserAvail) {
-      return <div className="p-4 text-center text-slate-400 text-sm">Loading user availability...</div>;
+    return results;
+  };
+
+  const meetingsByDate = useMemo(() => {
+    if (!Array.isArray(meetings) || meetings.length === 0) return {};
+    const byDate = {};
+    for (const m of meetings) {
+      if (!m.startTime) continue;
+      const start = DateTime.fromISO(m.startTime, { zone: "utc" }).setZone(selectedTimezone);
+      const end = m.endTime
+        ? DateTime.fromISO(m.endTime, { zone: "utc" }).setZone(selectedTimezone)
+        : null;
+      const key = start.toFormat("yyyy-MM-dd");
+      if (!byDate[key]) byDate[key] = [];
+      byDate[key].push({
+        ...m,
+        localStartLabel: start.toFormat("h:mm a"),
+        localEndLabel: end ? end.toFormat("h:mm a") : "",
+      });
     }
-    if (loadingMentorAvail) {
-      return <div className="p-4 text-center text-slate-400 text-sm">Loading mentor availability...</div>;
+    Object.keys(byDate).forEach((k) => {
+      byDate[k].sort(
+        (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+      );
+    });
+    return byDate;
+  }, [meetings, selectedTimezone]);
+
+  const parse12HourTo24 = (timeStr) => {
+    if (!timeStr) return "";
+    const parts = timeStr.trim().split(/\s+/);
+    if (parts.length < 2) return "";
+    const time = parts[0];
+    const periodRaw = parts[1] || "";
+    const period = periodRaw.toUpperCase();
+    const [hStr, mStr = "00"] = time.split(":");
+    let h = Number(hStr);
+    const m = Number(mStr);
+    if (Number.isNaN(h) || Number.isNaN(m)) return "";
+
+    if (period === "AM") {
+      if (h === 12) h = 0;
+    } else if (period === "PM") {
+      if (h !== 12) h += 12;
     }
-    const { byDate } = matchingByLocalDate;
-    const { dayKeys } = displayWeekInfo;
-    return (
-      <ul className="space-y-4">
-        {dayKeys.map((dateKey) => {
-          const dayLabel = DateTime.fromISO(dateKey + "T00:00:00", { zone: selectedTimezone }).toFormat("ccc, dd LLL");
-          const dayData = byDate[dateKey];
-          const slots = dayData?.slots ?? [];
-          if (slots.length === 0) return null;
-          return (
-            <li key={dateKey} className="border-b border-slate-800 pb-3 last:border-0">
-              <div className="font-medium text-white text-sm mb-2">{dayLabel}</div>
-              <ul className="space-y-1 pl-2">
-                {slots.map((slot) => (
-                  <li key={slot.startTime} className="text-slate-300 text-sm">
-                    {slot.convertedStart} – {slot.convertedEnd}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          );
-        })}
-      </ul>
-    );
+
+    const hh = `${h}`.padStart(2, "0");
+    const mm = `${m}`.padStart(2, "0");
+    return `${hh}:${mm}`;
+  };
+
+  const parse12RangeTo24 = (rangeStr) => {
+    if (!rangeStr) return { start: "", end: "" };
+    const parts = rangeStr.split("–");
+    if (parts.length !== 2) return { start: "", end: "" };
+    const start12 = parts[0].trim();
+    const end12 = parts[1].trim();
+    return {
+      start: parse12HourTo24(start12),
+      end: parse12HourTo24(end12),
+    };
   };
 
   return (
@@ -456,15 +553,13 @@ export default function AdminDashboard() {
           {error}
         </div>
       )}
-      {success && (
-        <div className="text-green-400 text-sm font-medium bg-green-500/10 border border-green-500/30 rounded-lg px-4 py-2">
-          {success}
-        </div>
-      )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <div className="flex flex-row items-start gap-4 w-full">
         {/* LEFT: Availability Viewer */}
-        <div className="lg:col-span-3 space-y-4">
+        <div
+          className="min-w-0 overflow-hidden space-y-4"
+          style={{ flex: "0 0 70%", width: "70%", maxWidth: "70%" }}
+        >
           <div>
             <h1 className="text-2xl font-semibold text-white">Admin Dashboard</h1>
             <p className="text-slate-400 font-medium mt-1">
@@ -472,13 +567,13 @@ export default function AdminDashboard() {
             </p>
           </div>
 
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-[140px]">
+          <div className="w-full flex flex-wrap md:flex-nowrap items-end gap-4">
+            <div className="w-full md:flex-1">
               <label className="block text-sm font-medium text-slate-400 mb-1">Timezone</label>
               <select
                 value={displayTimezone}
                 onChange={(e) => setDisplayTimezone(e.target.value)}
-                className="w-full rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {TIMEZONE_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
@@ -487,24 +582,45 @@ export default function AdminDashboard() {
                 ))}
               </select>
             </div>
-            <div className="min-w-[180px]">
+            <div className="w-full md:flex-1 min-w-[220px]">
               <label className="block text-sm font-medium text-slate-400 mb-1">User</label>
               <div className="flex gap-2">
-                <select
-                  value={selectedUser ? selectedUser.id : ""}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    setSelectedUser(id ? users.find((u) => u.id === id) || null : null);
-                  }}
-                  className="flex-1 rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Select user</option>
-                  {users.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.name} ({u.email})
-                    </option>
-                  ))}
-                </select>
+                <div className="relative flex-1">
+                  <select
+                    value={selectedUser ? selectedUser.id : ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      if (!id) {
+                        setSelectedUser(null);
+                        setUserEmail("");
+                        return;
+                      }
+                      setSelectedUser(users.find((u) => u.id === id) || null);
+                    }}
+                    className="w-full appearance-none rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-3 py-2 pr-8 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Select user</option>
+                    {users.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} ({u.email})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
+                    <svg
+                      className="w-4 h-4 text-slate-400"
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </div>
+                </div>
                 <button
                   type="button"
                   onClick={() => setShowAddUserModal(true)}
@@ -515,24 +631,45 @@ export default function AdminDashboard() {
                 </button>
               </div>
             </div>
-            <div className="min-w-[180px]">
+            <div className="w-full md:flex-1 min-w-[220px]">
               <label className="block text-sm font-medium text-slate-400 mb-1">Mentor</label>
               <div className="flex gap-2">
-                <select
-                  value={selectedMentor ? selectedMentor.id : ""}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    setSelectedMentor(id ? mentors.find((m) => m.id === id) || null : null);
-                  }}
-                  className="flex-1 rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Select mentor</option>
-                  {mentors.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} ({m.email})
-                    </option>
-                  ))}
-                </select>
+                <div className="relative flex-1">
+                  <select
+                    value={selectedMentor ? selectedMentor.id : ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      if (!id) {
+                        setSelectedMentor(null);
+                        setMentorEmail("");
+                        return;
+                      }
+                      setSelectedMentor(mentors.find((m) => m.id === id) || null);
+                    }}
+                    className="w-full appearance-none rounded-lg bg-slate-900 border border-slate-800 text-white font-medium px-4 py-2 pr-8 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Select mentor</option>
+                    {mentors.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.email})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
+                    <svg
+                      className="w-4 h-4 text-slate-400"
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </div>
+                </div>
                 <button
                   type="button"
                   onClick={() => setShowAddMentorModal(true)}
@@ -545,12 +682,58 @@ export default function AdminDashboard() {
             </div>
           </div>
 
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden p-4 min-h-[320px]">
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden p-4 flex flex-col">
             {!availabilityTarget ? (
-              <div className="flex items-center justify-center h-64 rounded-xl bg-slate-800/50 border border-slate-700 border-dashed">
-                <p className="text-slate-400 font-medium">
-                  Select a User and/or Mentor to view availability.
-                </p>
+              <>
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Meetings</h3>
+                    <p className="text-xs text-slate-400">
+                      Showing today and next 6 days
+                    </p>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+                    {upcomingDays.map(({ key, label }) => {
+                      const dayMeetings = meetingsByDate[key] || [];
+                      const day = DateTime.fromISO(`${key}T00:00:00`, { zone: selectedTimezone });
+                      const dayName = day.toFormat("ccc");
+                      const dayDate = day.toFormat("dd LLL");
+                      const tzLabel = displayTimezone === "IST" ? "IST" : "GMT";
+                      return (
+                        <div
+                          key={key}
+                          className="rounded-xl bg-slate-900/80 border border-slate-800 px-3 py-2 flex flex-col min-h-[120px]"
+                        >
+                          <div className="mb-2">
+                            <p className="text-xs font-semibold text-slate-200">{dayName}</p>
+                            <p className="text-xs text-slate-500">{dayDate}</p>
+                          </div>
+                          <div className="space-y-2">
+                            {dayMeetings.map((m) => (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => setActiveMeeting(m)}
+                                className="w-full text-left rounded-lg bg-slate-800/80 border border-slate-700 px-3 py-2 hover:bg-slate-800 transition"
+                              >
+                                <p className="text-xs font-semibold text-white truncate">{m.title}</p>
+                                <p className="text-[11px] text-slate-300 mt-0.5">
+                                  {m.localStartLabel} – {m.localEndLabel} {tzLabel}
+                                </p>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </>
+            ) : loadingUserAvail || loadingMentorAvail ? (
+              <div className="flex items-center justify-center h-64">
+                <p className="text-slate-400 text-sm">Loading availability...</p>
               </div>
             ) : (
               <>
@@ -568,69 +751,155 @@ export default function AdminDashboard() {
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={prevWeek}
-                      className="rounded-full w-8 h-8 flex items-center justify-center border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 text-sm"
-                    >
-                      ←
-                    </button>
-                    <span className="text-slate-400 text-sm">
-                      Week of {displayWeekInfo.weekLabel}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={nextWeek}
-                      className="rounded-full w-8 h-8 flex items-center justify-center border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 text-sm"
-                    >
-                      →
-                    </button>
+                  <div className="text-slate-400 text-xs">
+                    Showing today and next 6 days ({displayTimezone})
                   </div>
                 </div>
-                <div className="overflow-y-auto max-h-[400px] space-y-6">
-                  {selectedUser && (
-                    <section>
-                      <h3 className="text-sm font-semibold text-white mb-2">User Availability</h3>
-                      <div className="rounded-lg bg-slate-800/50 border border-slate-700 p-3">
-                        {renderUserWeeklyList()}
-                      </div>
-                    </section>
-                  )}
-                  {selectedMentor && (
-                    <section>
-                      <h3 className="text-sm font-semibold text-white mb-2">Mentor Availability</h3>
-                      <div className="rounded-lg bg-slate-800/50 border border-slate-700 p-3">
-                        {renderMentorWeeklyList()}
-                      </div>
-                    </section>
-                  )}
-                  {selectedUser && selectedMentor && (
-                    <section>
-                      <h3 className="text-sm font-semibold text-white mb-2">Matching Availability</h3>
-                      <div className="rounded-lg bg-slate-800/50 border border-slate-700 p-3">
-                        {renderMatchingList()}
-                      </div>
-                    </section>
-                  )}
+                <div className="flex-1 overflow-y-auto">
+                  <table className="w-full border-collapse table-auto">
+                    <thead>
+                      <tr className="border-b border-slate-700">
+                        <th className="py-4 px-4 text-left text-sm font-semibold text-slate-200 w-[150px] whitespace-nowrap">
+                          Date
+                        </th>
+                        <th className="py-4 px-4 text-left text-sm font-semibold text-slate-200 whitespace-nowrap">
+                          User Availability
+                        </th>
+                        <th className="py-4 px-4 text-left text-xs md:text-sm font-semibold text-slate-200 whitespace-nowrap">
+                          Mentor Availability
+                        </th>
+                        <th className="py-4 px-4 text-left text-sm font-semibold text-slate-200 whitespace-nowrap">
+                          Common Times
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {upcomingDays.map(({ key, label }, index) => {
+                        const userSlots = userByLocalDate.byDate[key]?.slots ?? [];
+                        const mentorSlots = mentorByLocalDate.byDate[key]?.slots ?? [];
+                        const commonIntervals = computeCommonSlotsForDay(userSlots, mentorSlots);
+                        const commonText =
+                          commonIntervals.length > 0
+                            ? commonIntervals
+                                .map(({ startHm, endHm }) =>
+                                  formatTimeRange(`${startHm} – ${endHm}`)
+                                )
+                                .join(", ")
+                            : "—";
+                        const rowBg =
+                          index % 2 === 0 ? "bg-slate-900/40" : "bg-slate-900/20";
+                        return (
+                          <tr key={key} className={`${rowBg} border-b border-slate-800/80`}>
+                            <td className="py-4 px-4 text-sm font-semibold text-slate-200 whitespace-nowrap align-middle">
+                              {label}
+                            </td>
+                            <td className="py-4 px-4 text-sm text-slate-300 align-top">
+                              {userSlots.length === 0 ? (
+                                <span className="text-slate-500">No availability</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-2">
+                                  {userSlots.map((slot) => (
+                                    <span
+                                      key={slot.startTime}
+                                      className="inline-flex items-center rounded-md bg-slate-800/90 border border-slate-600 px-2 py-1 text-xs text-slate-100"
+                                    >
+                                      {formatTimeRange(
+                                        `${slot.convertedStart} – ${slot.convertedEnd}`
+                                      )}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-4 px-4 text-sm text-slate-300 align-top">
+                              {mentorSlots.length === 0 ? (
+                                <span className="text-slate-500">No availability</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-2">
+                                  {mentorSlots.map((slot) => (
+                                    <span
+                                      key={slot.startTime}
+                                      className="inline-flex items-center rounded-md bg-slate-800/90 border border-slate-600 px-2 py-1 text-xs text-slate-100"
+                                    >
+                                      {formatTimeRange(
+                                        `${slot.convertedStart} – ${slot.convertedEnd}`
+                                      )}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-4 px-4 text-sm text-slate-100 align-top">
+                              {commonIntervals.length === 0 ? (
+                                <span className="text-slate-500">—</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-2">
+                                  {commonIntervals.map(({ startHm, endHm }, idx) => {
+                                    const slotKey = `${key}-${startHm}-${endHm}`;
+                                    const isSelected = selectedCommonSlot === slotKey;
+                                    return (
+                                      <button
+                                        key={slotKey}
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedCommonSlot(slotKey);
+                                          const dateStr = key; // yyyy-MM-dd in selected timezone
+                                          const labelRange = formatTimeRange(`${startHm} – ${endHm}`);
+                                          const { start, end } = parse12RangeTo24(labelRange);
+                                          if (start) {
+                                            setScheduleStart(`${dateStr}T${start}:00.000Z`);
+                                          }
+                                          if (end) {
+                                            setScheduleEnd(`${dateStr}T${end}:00.000Z`);
+                                          }
+
+                                          const userEmailLocal = userEmail || selectedUser?.email || "";
+                                          const mentorEmailLocal = mentorEmail || selectedMentor?.email || "";
+                                          const userName =
+                                            userEmailLocal.split("@")[0] || "user";
+                                          const mentorName =
+                                            mentorEmailLocal.split("@")[0] || "mentor";
+                                          setScheduleTitle(`MTQ<>${userName}:${mentorName}`);
+                                        }}
+                                        className={`inline-flex items-center rounded-md px-2 py-1 text-xs ${
+                                          isSelected
+                                            ? "bg-emerald-700 border border-emerald-300 text-emerald-50"
+                                            : "bg-emerald-800/70 border border-emerald-400 text-emerald-100"
+                                        }`}
+                                      >
+                                        {formatTimeRange(`${startHm} – ${endHm}`)}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </>
             )}
           </div>
         </div>
 
-        {/* RIGHT: Schedule Meeting card */}
-        <div className="lg:col-span-2">
-          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-6 sticky top-4">
-            <h2 className="text-lg font-semibold text-white mb-4">Schedule Meeting</h2>
-            <form onSubmit={handleScheduleMeeting} className="space-y-4">
+        {/* RIGHT: Schedule Meeting sidebar */}
+        <div
+          className="min-w-0 flex-shrink-0"
+          style={{ flex: "0 0 30%", width: "30%", maxWidth: "30%" }}
+        >
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 flex flex-col">
+            <h2 className="text-lg font-semibold text-white mb-3">Schedule Meeting</h2>
+            <form onSubmit={handleScheduleMeeting} className="space-y-3 flex-1 flex flex-col">
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-1">Admin email</label>
                 <input
                   type="email"
                   value={adminEmail}
                   disabled
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-slate-400 px-4 py-2 cursor-not-allowed"
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-slate-400 px-4 py-1.5 cursor-not-allowed"
                 />
               </div>
               <div>
@@ -639,7 +908,7 @@ export default function AdminDashboard() {
                   type="email"
                   value={userEmail}
                   onChange={(e) => setUserEmail(e.target.value)}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="user@example.com"
                 />
               </div>
@@ -649,25 +918,25 @@ export default function AdminDashboard() {
                   type="email"
                   value={mentorEmail}
                   onChange={(e) => setMentorEmail(e.target.value)}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="mentor@example.com"
                 />
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-1">Additional emails</label>
                 {additionalEmails.map((email, i) => (
-                  <div key={i} className="flex gap-2 mb-2">
+                  <div key={i} className="flex items-stretch gap-2 mb-2">
                     <input
                       type="email"
                       value={email}
                       onChange={(e) => setAdditionalEmail(i, e.target.value)}
-                      className="flex-1 rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="flex-1 min-w-0 box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
                       placeholder="email@example.com"
                     />
                     <button
                       type="button"
                       onClick={() => removeAdditionalEmail(i)}
-                      className="rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-slate-400 hover:text-white text-sm"
+                      className="rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-slate-400 hover:text-white text-sm whitespace-nowrap"
                     >
                       Remove
                     </button>
@@ -688,7 +957,7 @@ export default function AdminDashboard() {
                   value={scheduleTitle}
                   onChange={(e) => setScheduleTitle(e.target.value)}
                   required
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Meeting title"
                 />
               </div>
@@ -704,223 +973,244 @@ export default function AdminDashboard() {
                     setScheduleStart(`${d}T${startT}`);
                     setScheduleEnd(`${d}T${endT}`);
                   }}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 [color-scheme:dark]"
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 [color-scheme:dark]"
                 />
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-1">Start time</label>
-                <input
-                  type="time"
+                <select
                   value={scheduleStart ? scheduleStart.slice(11, 16) : ""}
                   onChange={(e) => {
                     const t = e.target.value;
-                    const d = scheduleStart ? scheduleStart.slice(0, 10) : new Date().toISOString().slice(0, 10);
+                    if (!t) {
+                      setScheduleStart("");
+                      return;
+                    }
+                    const d =
+                      scheduleStart?.slice(0, 10) || new Date().toISOString().slice(0, 10);
                     setScheduleStart(`${d}T${t}:00.000Z`);
                   }}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select time</option>
+                  {TIME_OPTIONS_30MIN.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-1">End time</label>
-                <input
-                  type="time"
+                <select
                   value={scheduleEnd ? scheduleEnd.slice(11, 16) : ""}
                   onChange={(e) => {
                     const t = e.target.value;
-                    const d = scheduleEnd ? scheduleEnd.slice(0, 10) : scheduleStart?.slice(0, 10) || new Date().toISOString().slice(0, 10);
-                    setScheduleEnd(`${d}T${t}:00.000Z`);
+                    if (!t) {
+                      setScheduleEnd("");
+                      return;
+                    }
+                    const baseDate =
+                      scheduleEnd?.slice(0, 10) ||
+                      scheduleStart?.slice(0, 10) ||
+                      new Date().toISOString().slice(0, 10);
+                    setScheduleEnd(`${baseDate}T${t}:00.000Z`);
                   }}
-                  className="w-full rounded-lg bg-slate-950 border border-slate-800 text-white px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                  className="w-full box-border rounded-lg bg-slate-950 border border-slate-800 text-white px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select time</option>
+                  {TIME_OPTIONS_30MIN.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
               </div>
-              {overlapSlots.length > 0 && availabilityTarget && (
-                <p className="text-amber-400 text-xs">
-                  Overlaps with {availabilityTarget.name}:{" "}
-                  {overlapSlots.map((s) => formatSlotLabel(s.startTime, s.endTime, displayTimezone)).join(", ")}
-                </p>
+              {success && (
+                <div className="rounded-lg bg-emerald-900/30 border border-emerald-500/40 text-emerald-200 text-xs px-3 py-2">
+                  {success}
+                </div>
               )}
               <button
                 type="submit"
                 disabled={loading}
                 className="w-full rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium px-6 py-2.5 transition disabled:opacity-50"
               >
-                {loading ? "Saving..." : "Confirm / Save"}
+                {loading ? "Saving..." : "Schedule Meeting"}
               </button>
             </form>
           </div>
         </div>
       </div>
 
-      {/* Meetings list - full width below */}
-      <div className="rounded-2xl bg-slate-900 border border-slate-800 p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Meetings</h2>
-        <div>
-          <div className="hidden md:grid grid-cols-5 gap-4 text-xs font-semibold text-slate-400 px-4 pt-1 pb-2 border-b border-slate-800">
-            <span>Date</span>
-            <span>Meeting Title</span>
-            <span>Attendees</span>
-            <span>Meet Link</span>
-            <span className="text-right">Delete</span>
-          </div>
-          <ul className="mt-2 space-y-3 max-h-80 overflow-y-auto">
-            {meetings.map((m) => (
-              <li key={m.id}>
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-start rounded-xl bg-slate-900/70 border border-slate-800 px-4 py-3 shadow-sm hover:shadow-md hover:bg-slate-900 transition-transform hover:-translate-y-0.5">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-white">
-                      {m.startTime
-                        ? new Date(m.startTime).toLocaleDateString(undefined, {
-                            day: "2-digit",
-                            month: "short",
-                            year: "numeric",
-                          })
-                        : "-"}
-                    </p>
-                    
+      {/* Meetings calendar - full width below (when availability is shown) */}
+      {availabilityTarget && (
+        <div className="rounded-2xl bg-slate-900 border border-slate-800 p-6 mt-4">
+          <h2 className="text-lg font-semibold text-white mb-4">Meetings</h2>
+          <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+            {upcomingDays.map(({ key, label }) => {
+              const dayMeetings = meetingsByDate[key] || [];
+              const day = DateTime.fromISO(`${key}T00:00:00`, { zone: selectedTimezone });
+              const dayName = day.toFormat("ccc");
+              const dayDate = day.toFormat("dd LLL");
+              const tzLabel = displayTimezone === "IST" ? "IST" : "GMT";
+              return (
+                <div
+                  key={key}
+                  className="rounded-xl bg-slate-900/80 border border-slate-800 px-3 py-2 flex flex-col min-h-[120px]"
+                >
+                  <div className="mb-2">
+                    <p className="text-xs font-semibold text-slate-200">{dayName}</p>
+                    <p className="text-xs text-slate-500">{dayDate}</p>
                   </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-white truncate">{m.title}</p>
-                    <p className="text-xs text-slate-400">
-                      {formatSlotLabel(m.startTime, m.endTime, displayTimezone)}
-                    </p>
-                  </div>
-                  <div className="text-xs text-slate-300">
-                    {m.participants?.length > 0 ? (
-                      <div className="space-y-0.5">
-                        {m.participants.map((p) => (
-                          <div key={p.email} className="truncate">
-                            {p.email}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="text-slate-500">No attendees listed</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-slate-300 space-y-1">
-                    {m.meetLink ? (
-                      <>
-                        <p className="font-medium text-slate-100">
-                          {m.startTime &&
-                            new Date(m.startTime).toLocaleDateString("en-US", {
-                              weekday: "long",
-                              month: "long",
-                              day: "numeric",
-                              timeZone: displayTimezone,
-                            })}
-                          {m.startTime &&
-                            m.endTime &&
-                            ` · ${new Date(m.startTime).toLocaleTimeString("en-US", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                              hour12: true,
-                              timeZone: displayTimezone,
-                            })} – ${new Date(m.endTime).toLocaleTimeString("en-US", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                              hour12: true,
-                              timeZone: displayTimezone,
-                            })}`}
+                  <div className="space-y-2">
+                    {dayMeetings.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => setActiveMeeting(m)}
+                        className="w-full text-left rounded-lg bg-slate-800/80 border border-slate-700 px-3 py-2 hover:bg-slate-800 transition"
+                      >
+                        <p className="text-xs font-semibold text-white truncate">{m.title}</p>
+                        <p className="text-[11px] text-slate-300 mt-0.5">
+                          {m.localStartLabel} – {m.localEndLabel} {tzLabel}
                         </p>
-                        <p className="text-slate-400">
-                          Time zone: {displayTimezone === "IST" ? "Asia/Kolkata" : "UTC"}
-                        </p>
-                        <div className="pt-1 flex items-start justify-between gap-3">
-                          <div className="space-y-0.5">
-                            <p className="font-semibold text-slate-200">Google Meet joining info</p>
-                            <p className="text-slate-400">Video call link:</p>
-                            <a
-                              href={m.meetLink}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="break-all text-blue-400 hover:text-blue-300 hover:underline"
-                            >
-                              {m.meetLink}
-                            </a>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              const datePart = m.startTime
-                                ? new Date(m.startTime).toLocaleDateString("en-US", {
-                                    weekday: "long",
-                                    month: "long",
-                                    day: "numeric",
-                                    timeZone: displayTimezone,
-                                  })
-                                : "";
-                              const startPart = m.startTime
-                                ? new Date(m.startTime).toLocaleTimeString("en-US", {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                    hour12: true,
-                                    timeZone: displayTimezone,
-                                  })
-                                : "";
-                              const endPart = m.endTime
-                                ? new Date(m.endTime).toLocaleTimeString("en-US", {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                    hour12: true,
-                                    timeZone: displayTimezone,
-                                  })
-                                : "";
-                              const lineTwo =
-                                datePart && startPart && endPart
-                                  ? `${datePart} · ${startPart} – ${endPart}`
-                                  : "";
-                              const formattedText = `${m.title}\n${lineTwo}\nTime zone: ${displayTimezone}\nGoogle Meet joining info\nVideo call link: ${
-                                m.meetLink ?? "Link pending"
-                              }`;
-                              navigator.clipboard.writeText(formattedText);
-
-                              const button = e.currentTarget;
-                              const originalLabel = button.innerHTML;
-                              button.innerHTML = "✓ Copied";
-                              button.classList.add("text-emerald-400");
-                              setTimeout(() => {
-                                button.innerHTML = originalLabel;
-                                button.classList.remove("text-emerald-400");
-                              }, 1500);
-                            }}
-                            className="inline-flex items-center justify-center rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500 text-slate-100 text-xs font-medium p-2 mt-0.5 transform active:scale-95 transition-all duration-200"
-                            aria-label="Copy meeting details"
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 20 20"
-                              fill="currentColor"
-                              className="w-3.5 h-3.5"
-                            >
-                              <path d="M6 2a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2v3a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3V2Zm2 4h4a2 2 0 0 1 2 2v3h1V2H8v4Zm4 2H3v8h9V8Z" />
-                            </svg>
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <span className="text-xs text-slate-500">Link pending</span>
-                    )}
-                  </div>
-                  <div className="flex items-center md:justify-end">
-                    <button
-                      type="button"
-                      onClick={() => setMeetingToDelete(m.id)}
-                      className="inline-flex items-center justify-center rounded-lg border border-red-500/70 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium px-3 py-1.5 transition"
-                    >
-                      Delete
-                    </button>
+                      </button>
+                    ))}
                   </div>
                 </div>
-              </li>
-            ))}
-            {meetings.length === 0 && (
-              <li>
-                <p className="text-slate-500 text-sm px-1 py-2">No meetings</p>
-              </li>
-            )}
-          </ul>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Meeting details modal */}
+      {activeMeeting && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+          onClick={() => setActiveMeeting(null)}
+        >
+          <div
+            className="rounded-2xl bg-slate-900 border border-slate-800 shadow-xl max-w-lg w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-white mb-3">
+              {activeMeeting.title}
+            </h3>
+            <p className="text-sm text-slate-300 mb-2">
+              {activeMeeting.startTime &&
+                new Date(activeMeeting.startTime).toLocaleDateString("en-US", {
+                  weekday: "long",
+                  month: "long",
+                  day: "numeric",
+                  year: "numeric",
+                  timeZone: displayTimezone === "IST" ? "Asia/Kolkata" : "UTC",
+                })}
+            </p>
+            <p className="text-sm text-slate-200 mb-4">
+              {formatSlotLabel(activeMeeting.startTime, activeMeeting.endTime, displayTimezone)}{" "}
+              ({displayTimezone === "IST" ? "IST" : "GMT"})
+            </p>
+
+            <div className="mb-4">
+              <p className="text-xs font-semibold text-slate-400 mb-1">Attendees</p>
+              {activeMeeting.participants?.length ? (
+                <ul className="text-xs text-slate-200 space-y-0.5">
+                  {activeMeeting.participants.map((p) => (
+                    <li key={p.email}>{p.email}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-slate-500">No attendees listed</p>
+              )}
+            </div>
+
+            <div className="mb-4">
+              <p className="text-xs font-semibold text-slate-400 mb-1">Google Meet link</p>
+              {activeMeeting.meetLink ? (
+                <div className="flex items-center gap-2">
+                  <a
+                    href={activeMeeting.meetLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-400 hover:text-blue-300 hover:underline break-all flex-1"
+                  >
+                    {activeMeeting.meetLink}
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!activeMeeting) return;
+                      const tzLabel =
+                        displayTimezone === "IST" ? "IST (GMT+5:30)" : "GMT (GMT+0)";
+                      const datePart = activeMeeting.startTime
+                        ? new Date(activeMeeting.startTime).toLocaleDateString("en-US", {
+                            weekday: "long",
+                            month: "long",
+                            day: "numeric",
+                            timeZone: displayTimezone === "IST" ? "Asia/Kolkata" : "UTC",
+                          })
+                        : "";
+                      const timeRange =
+                        activeMeeting.startTime && activeMeeting.endTime
+                          ? formatSlotLabel(
+                              activeMeeting.startTime,
+                              activeMeeting.endTime,
+                              displayTimezone
+                            )
+                          : "";
+                      const attendees =
+                        activeMeeting.participants && activeMeeting.participants.length
+                          ? activeMeeting.participants.map((p) => p.email).join(", ")
+                          : "";
+                      const lines = [
+                        activeMeeting.title || "",
+                        datePart && timeRange
+                          ? `${datePart} · ${timeRange}`
+                          : datePart || timeRange,
+                        `Time zone: ${tzLabel}`,
+                        `Attendees: ${attendees}`,
+                        "Google Meet joining info",
+                        `Video call link: ${activeMeeting.meetLink || "Link pending"}`,
+                      ].join("\n");
+
+                      navigator.clipboard.writeText(lines);
+                      setCopiedMeetingDetails(true);
+                      setTimeout(() => setCopiedMeetingDetails(false), 1500);
+                    }}
+                    className="inline-flex items-center justify-center rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium px-2 py-1"
+                  >
+                    {copiedMeetingDetails ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">Link pending</p>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => setActiveMeeting(null)}
+                className="rounded-lg border border-slate-600 bg-slate-800 text-slate-300 font-medium px-4 py-2 text-xs hover:bg-slate-700 transition"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMeetingToDelete(activeMeeting.id);
+                  setActiveMeeting(null);
+                }}
+                className="rounded-lg border border-red-500 bg-red-600 text-white font-medium px-4 py-2 text-xs hover:bg-red-500 transition"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete meeting confirmation modal */}
       {meetingToDelete !== null && (
