@@ -55,7 +55,7 @@ export default function AvailabilityDashboard({ role = "USER" }) {
     } finally {
       setLoading(false);
     }
-  }, [weekOffset, user]); // user added as dependency
+  }, [weekOffset, user?.id]); // user added as dependency
 
   useEffect(() => {
     if (user) fetchWeekly(); // only fetch when user is available
