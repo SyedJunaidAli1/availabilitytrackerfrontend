@@ -146,9 +146,20 @@ export default function Availability() {
     selectorDate !== "" && isSlotDisabled(selectorDate, selectorHour);
 
   const confirmSelectorSlot = () => {
-    if (!selectorDate || isSelectorSlotDisabled) return;
+     console.log("=== confirmSelectorSlot called ===");
+    console.log("selectorDate:", selectorDate);
+    console.log("selectorHour:", selectorHour);
+    console.log("isSelectorSlotDisabled:", isSelectorSlotDisabled);
+    console.log("!selectorDate:", !selectorDate);
+
+    if (!selectorDate || isSelectorSlotDisabled){
+      console.log("RETURNING EARLY — button did nothing");
+      return;
+    } 
     const key = `${selectorDate}-${selectorHour}`;
+    console.log("key being set:", key);
     setToggles((prev) => ({ ...prev, [key]: true }));
+    console.log("toggle set successfully");
   };
 
   const cancelChanges = () => {
