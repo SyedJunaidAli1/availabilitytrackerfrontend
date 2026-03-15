@@ -38,9 +38,11 @@ export default function AdminDashboard() {
   const [selectedUser, setSelectedUser] = useState(null);
   const [selectedMentor, setSelectedMentor] = useState(null);
   const [displayTimezone, setDisplayTimezone] = useState("UTC");
-  const [weekStart, setWeekStart] = useState(() =>
-    DateTime.now().setZone("UTC").startOf("week").set({ weekday: 1 }).toFormat("yyyy-MM-dd")
-  );
+  const [weekStart, setWeekStart] = useState(() => {
+    const today = new Date();
+    const base = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+    return base.toISOString().slice(0, 10);
+  });
   const emptyAvailability = useMemo(() => ({ dates: [], availability: {} }), []);
   const [userAvailability, setUserAvailability] = useState(() => ({ dates: [], availability: {} }));
   const [mentorAvailability, setMentorAvailability] = useState(() => ({ dates: [], availability: {} }));
@@ -323,32 +325,28 @@ export default function AdminDashboard() {
 
   const selectedTimezone = displayTimezone === "IST" ? "Asia/Kolkata" : "UTC";
 
-  /** Display week: Monday start in selected timezone (Luxon, weekday 1 = Monday). */
+  /** Display week: 7 days starting at weekStart (UTC), matching API grid. */
   const displayWeekInfo = useMemo(() => {
-    const weekStartDt = DateTime.fromISO(weekStart + "T00:00:00", { zone: selectedTimezone })
-      .startOf("week")
-      .set({ weekday: 1 });
+    const weekStartDt = DateTime.fromISO(weekStart + "T00:00:00Z");
     const dayKeys = [0, 1, 2, 3, 4, 5, 6].map((i) =>
       weekStartDt.plus({ days: i }).toFormat("yyyy-MM-dd")
     );
     return {
       weekStartDt,
       dayKeys,
-      weekLabel: weekStartDt.toFormat("ccc, dd LLL"),
+      weekLabel: weekStartDt.setZone(selectedTimezone).toFormat("ccc, dd LLL"),
     };
   }, [weekStart, selectedTimezone]);
 
   const prevWeek = () => {
-    const weekStartDt = DateTime.fromISO(weekStart + "T00:00:00", { zone: selectedTimezone })
-      .startOf("week")
-      .set({ weekday: 1 });
-    setWeekStart(weekStartDt.minus({ weeks: 1 }).toFormat("yyyy-MM-dd"));
+    setWeekStart(
+      DateTime.fromISO(weekStart + "T00:00:00Z").minus({ days: 7 }).toFormat("yyyy-MM-dd")
+    );
   };
   const nextWeek = () => {
-    const weekStartDt = DateTime.fromISO(weekStart + "T00:00:00", { zone: selectedTimezone })
-      .startOf("week")
-      .set({ weekday: 1 });
-    setWeekStart(weekStartDt.plus({ weeks: 1 }).toFormat("yyyy-MM-dd"));
+    setWeekStart(
+      DateTime.fromISO(weekStart + "T00:00:00Z").plus({ days: 7 }).toFormat("yyyy-MM-dd")
+    );
   };
 
   /** Group slots by backend date key; only time display converts to tz. Keeps cross-midnight slots on original day. */
