@@ -25,14 +25,14 @@ const Login = ({ setUser }) => {
         </h2>
 
         <input
-          className="w-full border p-3 rounded-lg mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full border text-black p-3 rounded-lg mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
           placeholder="Email"
           onChange={(e) => setEmail(e.target.value)}
         />
 
         <input
           type="password"
-          className="w-full border p-3 rounded-lg mb-6 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full border text-black p-3 rounded-lg mb-6 focus:outline-none focus:ring-2 focus:ring-blue-500"
           placeholder="Password"
           onChange={(e) => setPassword(e.target.value)}
         />

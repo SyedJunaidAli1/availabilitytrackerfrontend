@@ -38,7 +38,7 @@ const Admin = () => {
       <div className="grid grid-cols-2 gap-6">
         
         {/* Users */}
-        <div className="bg-white p-4 rounded-xl shadow">
+        <div className="bg-white text-black p-4 rounded-xl shadow">
           <h2 className="text-xl font-semibold mb-4">Users</h2>
 
           {users.map((user) => (
